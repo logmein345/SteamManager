@@ -99,7 +99,7 @@ function Show-HelpById {
             Write-Host '  - Uses anonymous SteamCMD login.'
             Write-Host '  - Downloads AppID 4785920.'
             Write-Host '  - Creates directories such as C:\GameServers\Server001.'
-            Write-Host '  - Example: +login anonymous +force_install_dir "C:\GameServers\Server001" +app_update 4785920 validate +quit'
+            Write-Host '  - Example: +force_install_dir "C:\GameServers\Server001" +login anonymous +app_update 4785920 validate +quit'
         }
         3 {
             Write-Host 'Startup Help:' -ForegroundColor Yellow
@@ -158,7 +158,9 @@ function Get-CommonSteamCmdCandidates {
         'D:\Steam',
         'C:\Games',
         'D:\Games'
-    ) | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | Select-Object -Unique
+    ) | Where-Object {
+        -not [string]::IsNullOrWhiteSpace($_) -and (Test-Path -Path $_ -PathType Container)
+    } | Select-Object -Unique
 
     foreach ($root in $knownRoots) {
         $candidates += Join-Path $root 'Steam\steamcmd\steamcmd.exe'
@@ -190,21 +192,6 @@ function AutoDetect-SteamCmdPath {
     foreach ($candidate in $candidates) {
         if (Test-Path $candidate) {
             return (Resolve-Path $candidate).Path
-        }
-    }
-
-    foreach ($drive in Get-PSDrive -PSProvider FileSystem) {
-        if (-not $drive.Root) { continue }
-        if (-not (Test-Path $drive.Root)) { continue }
-
-        try {
-            $result = Get-ChildItem -Path $drive.Root -Filter 'steamcmd.exe' -Recurse -File -ErrorAction SilentlyContinue | Select-Object -First 1
-            if ($result) {
-                return $result.FullName
-            }
-        }
-        catch {
-            continue
         }
     }
 
@@ -339,7 +326,7 @@ function Invoke-SetupWizard {
 
     $defaultConfig = Get-DefaultConfig
 
-    $defaultSteamCmd = if ($null -eq $defaultConfig.SteamCmdPath) { 'C:\Steam\steamcmd\steamcmd.exe' } else { $defaultConfig.SteamCmdPath }
+    $defaultSteamCmd = if ($null -eq $defaultConfig.SteamCmdPath) { 'C:\Program Files (x86)\Steam\steamcmd\steamcmd.exe' } else { $defaultConfig.SteamCmdPath }
     $steamCmdPath = Get-ConfigValueWithPrompt -Name 'SteamCMD Path' -Description 'Location of steamcmd.exe' -DefaultValue $defaultSteamCmd -Example 'C:\Program Files (x86)\Steam\steamcmd\steamcmd.exe' -HelpId 1
     $baseRoot = Get-ConfigValueWithPrompt -Name 'Server Root' -Description 'Root folder used for all server instances' -DefaultValue $defaultConfig.BaseRoot -Example 'C:\GameServers' -HelpId 5
     $appId = Get-ConfigValueWithPrompt -Name 'App ID' -Description 'SteamCMD AppID to install/update' -DefaultValue $defaultConfig.AppId -Example '4785920' -HelpId 2
@@ -444,6 +431,22 @@ function Get-NextInstanceInfo {
     }
 }
 
+function Test-IsExcludedServerExecutable {
+    <#
+    .SYNOPSIS
+        Identifies executables that are not dedicated server binaries.
+    .PARAMETER Path
+        Executable path to inspect.
+    #>
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Path
+    )
+
+    $name = Split-Path -Path $Path -Leaf
+    return $name -match 'Editor|Launcher|CrashReport|Prereq|Redist|Installer|unins|steamcmd'
+}
+
 function Get-ServerExecutablePath {
     <#
     .SYNOPSIS
@@ -468,8 +471,7 @@ function Get-ServerExecutablePath {
     }
 
     $filtered = $candidates | Where-Object {
-        $name = $_.Name
-        $name -notmatch 'Editor|Launcher|CrashReport' -and $name -notmatch 'unins' -and $name -notmatch 'steamcmd'
+        -not (Test-IsExcludedServerExecutable -Path $_.FullName)
     }
 
     if (-not $filtered) {
@@ -567,7 +569,7 @@ function Set-InstanceState {
         Path of the server instance.
     .PARAMETER State
         State name.
-    .PARAMETER PID
+    .PARAMETER ProcessId
         PID, if any.
     .PARAMETER CrashCount
         Crash count to store.
@@ -577,7 +579,7 @@ function Set-InstanceState {
         [string]$InstancePath,
         [Parameter(Mandatory = $true)]
         [string]$State,
-        [int]$PID = 0,
+        [int]$ProcessId = 0,
         [int]$CrashCount = 0
     )
 
@@ -588,7 +590,7 @@ function Set-InstanceState {
 
     $json = Get-Content -Path $instanceFile -Raw | ConvertFrom-Json
     $json.State = $State
-    $json.PID = $PID
+    $json.PID = $ProcessId
     $json.CrashCount = $CrashCount
 
     if ($State -eq 'Running') {
@@ -650,8 +652,8 @@ function Invoke-SteamCmdUpdate {
     }
 
     $arguments = @(
-        '+login', 'anonymous',
         '+force_install_dir', $InstancePath,
+        '+login', 'anonymous',
         '+app_update', $AppId,
         'validate',
         '+quit'
@@ -750,7 +752,7 @@ function Update-Instance {
     $instanceData = Get-Content -Path $instanceFile -Raw | ConvertFrom-Json
     $exePath = $instanceData.ExecutablePath
 
-    if (-not $exePath -or -not (Test-Path $exePath)) {
+    if (-not $exePath -or -not (Test-Path $exePath) -or (Test-IsExcludedServerExecutable -Path $exePath)) {
         $exePath = Repair-ExecutablePath -InstancePath $instancePath
         if (-not $exePath) {
             throw "Executable missing and could not be auto-detected in $instancePath"
@@ -816,7 +818,7 @@ function Start-Instance {
     $instanceData = Get-Content -Path $instanceFile -Raw | ConvertFrom-Json
 
     $exePath = $instanceData.ExecutablePath
-    if (-not $exePath -or -not (Test-Path $exePath)) {
+    if (-not $exePath -or -not (Test-Path $exePath) -or (Test-IsExcludedServerExecutable -Path $exePath)) {
         $exePath = Repair-ExecutablePath -InstancePath $instancePath
     }
 
@@ -825,16 +827,22 @@ function Start-Instance {
     }
 
     $startupArgs = Get-ResolvedStartupArguments -InstanceData $instanceData -Template $Config.StartupTemplate
-    $process = Start-Process -FilePath $exePath -ArgumentList $startupArgs -WorkingDirectory $instancePath -PassThru -WindowStyle Hidden
+    $logPath = if ($instanceData.LogPath) { $instanceData.LogPath } else { Join-Path $instancePath 'server.log' }
+    if (Test-Path $logPath) {
+        Remove-Item -Path $logPath -Force
+    }
+    $startupArgs = ($startupArgs + ' -abslog="' + $logPath + '"').Trim()
 
-    Set-InstanceState -InstancePath $instancePath -State 'Running' -PID $process.Id -CrashCount $instanceData.CrashCount
+    $process = Start-Process -FilePath $exePath -ArgumentList $startupArgs -WorkingDirectory $instancePath -PassThru -WindowStyle Normal
+
+    Set-InstanceState -InstancePath $instancePath -State 'Running' -ProcessId $process.Id -CrashCount $instanceData.CrashCount
 
     $instanceData.State = 'Running'
     $instanceData.PID = $process.Id
     $instanceData.LastStart = (Get-Date).ToString('o')
     $instanceData | ConvertTo-Json -Depth 10 | Set-Content -Path $instanceFile -Encoding UTF8
 
-    Write-StatusLog "Started $InstanceName (PID $($process.Id))."
+    Write-StatusLog "Started $InstanceName (PID $($process.Id)). Log: $logPath"
     return $process
 }
 
@@ -857,17 +865,17 @@ function Stop-Instance {
 
     $instanceFile = Join-Path $instancePath 'instance.json'
     $instanceData = Get-Content -Path $instanceFile -Raw | ConvertFrom-Json
-    $pid = [int]$instanceData.PID
+    $processId = [int]$instanceData.PID
 
-    if ($pid -gt 0) {
-        $process = Get-Process -Id $pid -ErrorAction SilentlyContinue
+    if ($processId -gt 0) {
+        $process = Get-Process -Id $processId -ErrorAction SilentlyContinue
         if ($process) {
-            Stop-Process -Id $pid -Force
-            Write-StatusLog "Stopped $InstanceName (PID $pid)."
+            Stop-Process -Id $processId -Force
+            Write-StatusLog "Stopped $InstanceName (PID $processId)."
         }
     }
 
-    Set-InstanceState -InstancePath $instancePath -State 'Stopped' -PID 0 -CrashCount ([int]$instanceData.CrashCount)
+    Set-InstanceState -InstancePath $instancePath -State 'Stopped' -ProcessId 0 -CrashCount ([int]$instanceData.CrashCount)
     Write-StatusLog "Instance $InstanceName marked as stopped."
 }
 
@@ -918,12 +926,12 @@ function Get-InstanceStatus {
     }
 
     $instanceData = Get-Content -Path $instanceFile -Raw | ConvertFrom-Json
-    $pid = [int]$instanceData.PID
+    $processId = [int]$instanceData.PID
     $logAge = Get-LogAgeMinutes -LogPath $instanceData.LogPath
     $state = 'Stopped'
 
-    if ($pid -gt 0) {
-        $proc = Get-Process -Id $pid -ErrorAction SilentlyContinue
+    if ($processId -gt 0) {
+        $proc = Get-Process -Id $processId -ErrorAction SilentlyContinue
         if ($proc) {
             if ([int]$instanceData.CrashCount -gt 0) {
                 $state = 'Crashed'
@@ -949,7 +957,7 @@ function Get-InstanceStatus {
     return @{
         Name = $instanceData.Name
         State = $state
-        PID = $pid
+        PID = $processId
         Port = [int]$instanceData.Port
         QueryPort = [int]$instanceData.QueryPort
         CrashCount = [int]$instanceData.CrashCount
