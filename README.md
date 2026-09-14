@@ -101,6 +101,8 @@ The default startup template is:
 
 Supported template variables are `{PORT}`, `{QUERYPORT}`, and `{NAME}`.
 
+When the server is started, SteamManager adds Unreal's `-abslog` option and points it to the instance's `server.log` file. The `-log` option in the template tells the Unreal Dedicated Server to open a live log console window. If `-log` is removed, the server still writes to `server.log`, but no live log window is opened.
+
 ## Status
 
 `Status` reports the instance state, process ID, game port, query port, crash count, and log age. The reported states are:
