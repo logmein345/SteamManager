@@ -20,7 +20,7 @@ SteamManager can search common locations for `steamcmd.exe`, or you can provide 
 3. Run the script:
 
 	```powershell
-	.\SteamManager.ps1
+	powershell.exe -ExecutionPolicy Bypass -File .\SteamManager.ps1
 	```
 
 4. Complete the first-run prompts. The configuration is saved as `config.json` next to the script.
